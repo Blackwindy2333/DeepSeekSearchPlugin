@@ -23,7 +23,7 @@ from uuid import uuid4
 from .cache import TTLCache
 from .client import DeepSeekClient
 from .config import DeepSeekSearchConfig
-from .errors import DeepSeekSearchError
+from .errors import ConfigurationError, DeepSeekSearchError
 from .formatting import format_error, format_fetch_result, format_search_result
 from .metrics import Metrics
 from .models import FetchResult, SearchResult
@@ -206,6 +206,7 @@ class DeepSeekSearchService:
 
         old = self._config
         changes: dict[str, Any] = {}
+        old_bucket = self._bucket
         if old.ratelimit != config.ratelimit:
             changes["ratelimit"] = {
                 "enabled": config.ratelimit.enabled,
@@ -230,7 +231,10 @@ class DeepSeekSearchService:
 
         self._config = config
         new_signature = self._signature(config)
-        if new_signature != self._client_signature and self._client is not None:
+        # 客户端持有创建时传入的令牌桶引用：限速开关切换会替换桶对象，
+        # 此时必须重建客户端，否则旧客户端会继续按旧桶限速（或继续完全不限速）。
+        bucket_swapped = self._bucket is not old_bucket
+        if (new_signature != self._client_signature or bucket_swapped) and self._client is not None:
             changes["client"] = "rebuilt"
             await self.aclose_client()
         return changes
@@ -268,6 +272,8 @@ class DeepSeekSearchService:
             DeepSeekSearchError: 配置缺失（缺少 Key 等）。
         """
 
+        if self._closed:
+            raise ConfigurationError("搜索服务已关闭", user_message="插件正在重载，请稍后再试")
         signature = self._signature()
         if self._client is not None and signature == self._client_signature:
             return self._client
@@ -439,13 +445,21 @@ class DeepSeekSearchService:
             if isinstance(cached, FetchResult):
                 elapsed_ms = (time.monotonic() - started) * 1000
                 self._metrics.record_fetch(elapsed_ms=elapsed_ms, cached=True, chars=len(cached.content))
+                # 缓存里存的是完整正文，truncated 必须按本次请求的 limit 重新计算：
+                # 否则先抓 6000 字、再用 500 字上限命中缓存时，标记会错误地停留在「未截断」。
+                cached_view = FetchResult(
+                    url=cached.url or target,
+                    title=cached.title,
+                    content=cached.content,
+                    truncated=len(cached.content) > limit,
+                )
                 if cfg.logging.log_requests:
                     self._logger.info("fetch.cache_hit rid=%s chars=%d elapsed_ms=%.1f", rid, len(cached.content), elapsed_ms)
                 return FetchOutcome(
                     success=True,
-                    content=self._format_fetch(cached, limit),
+                    content=self._format_fetch(cached_view, limit),
                     url=target,
-                    result=cached,
+                    result=cached_view,
                     cached=True,
                     elapsed_ms=elapsed_ms,
                 )

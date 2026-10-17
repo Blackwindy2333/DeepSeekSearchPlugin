@@ -181,3 +181,57 @@ async def test_aclose_releases_client():
     await service.search("关闭测试")
     await service.aclose()
     assert fake.closed is True
+
+
+async def test_rate_limit_toggle_rebuilds_client_with_new_bucket():
+    """限速开关热切换后，客户端必须绑定新桶（否则旧桶限速继续生效）。"""
+
+    config = make_config(ratelimit={"enabled": False})
+    service, _, factory_calls = make_service(config=config)
+    await service.search("限速关闭")
+    assert len(factory_calls) == 1
+    assert service.snapshot()["ratelimit"] is None
+
+    new_config = make_config(ratelimit={"enabled": True, "qps": 2.0, "burst": 1})
+    changes = await service.apply_config(new_config)
+
+    assert changes["client"] == "rebuilt"
+    assert service.snapshot()["ratelimit"]["qps"] == 2.0
+    await service.search("限速打开")
+    assert len(factory_calls) == 2
+
+
+async def test_fetch_cache_hit_recomputes_truncation_for_new_limit():
+    """缓存正文按本次 limit 重新判定 truncated，而不是沿用首次请求的标记。"""
+
+    from deepseek_search.models import FetchResult
+
+    long_content = "正" * 6000
+    fake = FakeClient(
+        fetch_result=FetchResult(url="https://example.com/long", title="长文", content=long_content),
+    )
+    service, _, _ = make_service(fake=fake)
+
+    first = await service.fetch("https://example.com/long", max_chars=6000)
+    assert first.result is not None
+    assert first.result.truncated is False
+
+    cached = await service.fetch("https://example.com/long", max_chars=500)
+    assert cached.cached is True
+    assert cached.result is not None
+    assert cached.result.truncated is True
+    assert "已截断" in cached.content
+    assert len(fake.fetch_calls) == 1
+
+
+async def test_closed_service_rejects_new_requests():
+    """aclose() 之后不允许悄悄创建新客户端复活服务。"""
+
+    service, fake, _ = make_service()
+    await service.search("关闭前")
+    await service.aclose()
+
+    outcome = await service.search("关闭后")
+    assert outcome.success is False
+    assert outcome.error
+    assert fake.closed is True
