@@ -22,7 +22,7 @@ from conftest import configure
 def test_default_values_follow_documented_plan():
     config = DeepSeekSearchConfig()
     assert config.plugin.enabled is True
-    assert config.plugin.config_version == "1.0.0"
+    assert config.plugin.config_version == "1.1.0"
     assert config.api.base_url == "https://api.deepseek.com"
     assert config.api.timeout_seconds == 20.0
     assert config.api.max_retries == 2
@@ -118,6 +118,6 @@ def test_plugin_config_roundtrip_through_sdk(plugin_module):
     assert instance.config.commands.enabled is False
 
     data = instance.get_plugin_config_data()
-    assert data["plugin"]["config_version"] == "1.0.0"
+    assert data["plugin"]["config_version"] == "1.1.0"
     assert data["search"]["default_count"] == 3
     assert data["api"]["api_key"] == "sk-demo-1234"

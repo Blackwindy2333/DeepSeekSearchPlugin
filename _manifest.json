@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "blackbee114514.deepseek-search",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "DeepSeek 联网搜索与网页抓取",
   "description": "为 MaiBot 接入 DeepSeek Search / Fetch API：LLM 工具 search_web 与 fetch_webpage、/search 与 /fetch 命令、插件间 API 以及首页状态卡片，内置限速、缓存与脱敏日志。",
   "author": {

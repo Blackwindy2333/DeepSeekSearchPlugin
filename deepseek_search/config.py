@@ -29,7 +29,7 @@ class PluginInfoSection(BaseModel):
     model_config = _SECTION_CONFIG
 
     enabled: bool = Field(default=True, description="是否启用本插件")
-    config_version: str = Field(default="1.0.0", description="配置版本，供 Host 做迁移判断，请勿手改")
+    config_version: str = Field(default="1.1.0", description="配置版本，供 Host 做迁移判断，请勿手改")
 
 
 class ApiSection(BaseModel):

@@ -157,3 +157,10 @@ def test_home_card_key_value_block_uses_mapping(plugin_module):
     for block in key_value_blocks:
         assert isinstance(block["entries"], dict)
         assert all(isinstance(value, str) for value in block["entries"].values())
+
+def test_manifest_version_matches_package_version():
+    """manifest 版本必须与包内版本常量一致，避免 Tag 与代码漂移。"""
+
+    from deepseek_search.__version__ import PLUGIN_VERSION
+
+    assert load_manifest()["version"] == PLUGIN_VERSION

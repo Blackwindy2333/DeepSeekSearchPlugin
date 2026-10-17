@@ -5448,7 +5448,7 @@ python -c "import json; print(json.load(open('_manifest.json'))['version'])"
 | 字段 | 值 |
 | --- | --- |
 | 插件 ID | `blackbee114514.deepseek-search` |
-| 当前版本 | `1.0.0` |
+| 当前版本 | `1.1.0` |
 | 作者 | BlackBee114514（<https://space.bilibili.com/1041748349>） |
 | 许可证 | GPL-3.0 |
 | 宿主要求 | `>=1.3.0,<999.999.999` |
@@ -5563,7 +5563,7 @@ MAIBOT_DSP_TIMEOUT        # 覆盖 api.timeout_seconds
 1. `python -m json.tool _manifest.json` 通过（严格 JSON、无多余字段）。
 2. `python -c "from plugin import create_plugin; create_plugin()"` 无异常。
 3. `python -m pytest -q` 全绿（不访问网络、不需要 Key）。
-4. 宿主机日志出现 `插件加载完成 id=blackbee114514.deepseek-search version=1.0.0`。
+4. 宿主机日志出现 `插件加载完成 id=blackbee114514.deepseek-search version=1.1.0`。
 5. 配置了 Key 后 `/search DeepSeek 搜索 API` 能返回带链接的结果。
 6. `/fetch <上一步的链接>` 能返回 Markdown 正文。
 7. 首页卡片能看到「DeepSeek 联网搜索」，点击可跳到插件配置页。
