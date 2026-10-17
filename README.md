@@ -12,8 +12,8 @@
 
 | 能力 | 形态 | 说明 |
 | --- | --- | --- |
-| `search_web` | Tool | LLM 自主联网搜索，支持 `site:` `after:` `before:` `lang:` 等语法 |
-| `fetch_webpage` | Tool | LLM 抓取给定链接的 Markdown 正文 |
+| `search_web` | Tool | LLM 自主联网搜索，支持 `site:` `after:` `before:` `lang:` 等语法（`core_tool`，模型每轮直接可见） |
+| `fetch_webpage` | Tool | LLM 抓取给定链接的 Markdown 正文（`core_tool`，模型每轮直接可见） |
 | `/search`、`/搜索` | Command | 用户直接搜索，最多展示 N 条 |
 | `/fetch`、`/抓取` | Command | 用户直接抓取链接正文 |
 | `search`、`get_stats` | API | 供其它插件 RPC 调用（结构化结果 / 运行统计） |

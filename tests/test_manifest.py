@@ -127,6 +127,16 @@ def test_command_patterns_match_documented_usage(plugin_module):
     assert not fetch_pattern.match("/fetchx https://example.com/a")
 
 
+def test_tools_are_core_tools_visible_to_model(plugin_module):
+    """工具必须是核心工具：默认 deferred 池里的工具模型无法主动调用。"""
+
+    instance = plugin_module.create_plugin()
+    tools = {item["name"]: item["metadata"] for item in instance.get_components() if item["type"] == "TOOL"}
+
+    for name in ("search_web", "fetch_webpage"):
+        assert tools[name].get("core_tool") is True, f"{name} 必须设置 core_tool=True 才能被模型每轮直接看到"
+
+
 def test_home_card_links_to_plugin_config_page(plugin_module):
     instance = plugin_module.create_plugin()
     card = next(item for item in instance.get_components() if item["type"] == "HOME_CARD")

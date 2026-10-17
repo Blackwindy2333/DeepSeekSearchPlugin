@@ -216,6 +216,7 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
                 required=False,
             ),
         ],
+        core_tool=True,
     )
     async def search_web(
         self,
@@ -257,6 +258,7 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
                 required=False,
             ),
         ],
+        core_tool=True,
     )
     async def fetch_webpage(
         self,
