@@ -38,6 +38,17 @@ def test_validate_url_accepts_public_http_urls(url):
         "http://[::1]/",
         "http://router.local/",
         "http://service.internal/",
+        # 非规范 IP 字面量：解析器可能当成内网地址
+        "http://0x7f.0.0.1/",
+        "http://127.1/",
+        "http://2130706433/",
+        "http://0177.0.0.1/",
+        # 保留域后缀
+        "http://foo.localhost/",
+        "http://x.home.arpa/",
+        # 控制字符
+        "https://example.com/a\x00b",
+        "https://example.com/a\nb",
     ],
 )
 def test_validate_url_rejects_unsafe_targets(url):

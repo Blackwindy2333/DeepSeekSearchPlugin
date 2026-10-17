@@ -133,3 +133,17 @@ def test_home_card_links_to_plugin_config_page(plugin_module):
     assert card["name"] == "status"
     assert card["metadata"]["link_url"].startswith("/plugin-config?plugin=")
     assert card["metadata"]["icon"] == "search"
+
+
+def test_home_card_key_value_block_uses_mapping(plugin_module):
+    """官方 schema 要求 key_value 块的 entries 是 {"键": "值"} 字典。"""
+
+    instance = plugin_module.create_plugin()
+    card = next(item for item in instance.get_components() if item["type"] == "HOME_CARD")
+    content = card["metadata"]["content"]
+    assert isinstance(content, list)
+    key_value_blocks = [block for block in content if block.get("type") == "key_value"]
+    assert key_value_blocks, "首页卡片应包含 key_value 块"
+    for block in key_value_blocks:
+        assert isinstance(block["entries"], dict)
+        assert all(isinstance(value, str) for value in block["entries"].values())

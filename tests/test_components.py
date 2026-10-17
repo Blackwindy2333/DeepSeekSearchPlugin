@@ -159,3 +159,18 @@ def test_coerce_int(plugin_module, raw, expected):
 )
 def test_coerce_bool(plugin_module, raw, expected):
     assert plugin_module._coerce_bool(raw) == expected
+
+
+async def test_fetch_command_caps_reply_length(plugin_with_fake_client):
+    """聊天命令回复的正文有长度上限（工具调用不受此限），避免刷屏。"""
+
+    from deepseek_search.models import FetchResult
+
+    plugin, fake = plugin_with_fake_client
+    fake.fetch_result = FetchResult(url="https://example.com/long", title="长页", content="正" * 6000)
+
+    success, response, _ = await plugin.cmd_fetch(matched_groups={"url": "https://example.com/long"})
+
+    assert success is True
+    assert "已截断" in response
+    assert len(response) < 3000

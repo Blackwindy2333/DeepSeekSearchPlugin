@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import urllib.parse
 
 from .errors import UnsupportedUrlError
@@ -23,23 +24,33 @@ ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 #: 明确禁止的主机名（本机回环）
 _BLOCKED_HOSTNAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
+#: 明确禁止的域名后缀（内网保留域）
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+#: 非规范 IPv4 字面量（十进制整数、十六进制、缩短形式），如 2130706433 / 0x7f.0.0.1 / 127.1
+_NON_CANONICAL_IPV4 = re.compile(r"^(?:0[xX][0-9a-fA-F]+|\d+)(?:\.(?:0[xX][0-9a-fA-F]+|\d+)){0,3}\.?$")
 
 
-def _ip_is_public(raw: str) -> bool:
-    """判断字面量 IP 是否属于公网地址。
+def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """尝试把主机名解析成字面量 IP。
 
     Args:
-        raw: IP 字符串。
+        host: 小写主机名。
 
     Returns:
-        bool: 公网地址返回 True；解析失败按「不可用」处理返回 False。
+        IP 对象；不是 IP 字面量（含十进制整数形式）时返回 ``None``。
     """
 
     try:
-        ip = ipaddress.ip_address(raw.strip("[]"))
+        return ipaddress.ip_address(host)
     except ValueError:
-        return False
-    return bool(ip.is_global)
+        pass
+    if host.isdigit():
+        # 某些写法把 IPv4 当作 32 位整数（如 2130706433 == 127.0.0.1）
+        try:
+            return ipaddress.IPv4Address(int(host))
+        except (ValueError, ipaddress.AddressValueError):
+            return None
+    return None
 
 
 def validate_url(url: str) -> str:
@@ -60,6 +71,8 @@ def validate_url(url: str) -> str:
         raise UnsupportedUrlError("链接为空", user_message="请提供要抓取的网页链接")
     if len(candidate) > MAX_URL_LENGTH:
         raise UnsupportedUrlError("链接过长", user_message=f"链接长度超过 {MAX_URL_LENGTH} 字符，无法抓取")
+    if any(ord(char) < 0x20 or char == "\x7f" for char in candidate):
+        raise UnsupportedUrlError("链接包含控制字符", user_message="链接格式不正确")
 
     try:
         parsed = urllib.parse.urlsplit(candidate)
@@ -75,13 +88,16 @@ def validate_url(url: str) -> str:
         raise UnsupportedUrlError("链接包含用户名或密码", user_message="链接里不能包含用户名或密码")
 
     host = parsed.hostname.strip().lower()
-    if host in _BLOCKED_HOSTNAMES:
-        raise UnsupportedUrlError(f"禁止抓取本机地址: {host}", user_message="不支持抓取本机/内网地址")
-    if host.endswith(".local") or host.endswith(".internal"):
-        raise UnsupportedUrlError(f"禁止抓取内网域名: {host}", user_message="不支持抓取本机/内网地址")
-    if host.replace(".", "").isdigit() or ":" in host:
-        if not _ip_is_public(host):
+    if host in _BLOCKED_HOSTNAMES or host.endswith(_BLOCKED_HOST_SUFFIXES):
+        raise UnsupportedUrlError(f"禁止抓取本机/内网地址: {host}", user_message="不支持抓取本机/内网地址")
+
+    ip = _parse_ip_literal(host)
+    if ip is not None:
+        if not ip.is_global:
             raise UnsupportedUrlError(f"禁止抓取非公网地址: {host}", user_message="不支持抓取本机/内网地址")
+    elif _NON_CANONICAL_IPV4.match(host):
+        # 0x7f.0.0.1 / 127.1 / 2130706433 这类写法容易被解析器当作内网地址，一律拒绝
+        raise UnsupportedUrlError(f"禁止抓取非规范 IP 地址: {host}", user_message="不支持抓取本机/内网地址")
 
     return candidate
 

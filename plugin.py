@@ -66,6 +66,8 @@ CONFIG_PAGE_LINK = f"/plugin-config?plugin={PLUGIN_ID}"
 #: 命令用法提示
 SEARCH_USAGE = "用法：/search 关键词（支持 site:/after:/before:/lang: 等检索语法）"
 FETCH_USAGE = "用法：/fetch 网页链接（http/https）"
+#: /fetch 命令回复的正文上限（聊天消息不适合贴长篇正文；工具调用不受此限制）
+COMMAND_FETCH_MAX_CHARS = 1500
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -311,7 +313,10 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
         if not url:
             return False, FETCH_USAGE, 0
         service = self._require_service("cmd_fetch")
-        outcome = await service.fetch(url, max_chars=int(config.fetch.max_content_chars))
+        outcome = await service.fetch(
+            url,
+            max_chars=min(int(config.fetch.max_content_chars), COMMAND_FETCH_MAX_CHARS),
+        )
         return bool(outcome.success), outcome.content, 0
 
     # ── API 组件（插件间 RPC） ──────────────────────────────
@@ -388,11 +393,11 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
             },
             {
                 "type": "key_value",
-                "entries": [
-                    {"key": "工具", "value": "search_web / fetch_webpage"},
-                    {"key": "命令", "value": "/search、/fetch"},
-                    {"key": "缓存", "value": "TTL + LRU（可在配置中关闭）"},
-                ],
+                "entries": {
+                    "工具": "search_web / fetch_webpage",
+                    "命令": "/search、/fetch",
+                    "缓存": "TTL + LRU（可在配置中关闭）",
+                },
             },
             {
                 "type": "actions",

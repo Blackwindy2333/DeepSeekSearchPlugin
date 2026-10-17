@@ -375,3 +375,26 @@ async def test_aclose_is_idempotent():
     client, _ = make_client(handler)
     await client.aclose()
     await client.aclose()
+
+
+async def test_connect_timeout_larger_than_total_is_clamped():
+    """connect 超时大于总超时不应让 httpx.Timeout 抛 ValueError。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": []})
+
+    captured: dict = {}
+    client = DeepSeekClient(
+        "sk-test-abcd1234",
+        timeout_seconds=2,
+        connect_timeout_seconds=60,
+        transport=httpx.MockTransport(handler),
+        log_requests=False,
+    )
+    try:
+        result = await client.search("超时钳制")
+        assert result.is_empty is True
+        assert captured["url"].endswith("/v1/tools/search")
+    finally:
+        await client.aclose()

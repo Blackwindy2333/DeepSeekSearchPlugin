@@ -170,7 +170,11 @@ class DeepSeekClient:
         self._preview_chars = max(0, int(preview_chars))
 
         httpx_module = _import_httpx()
-        timeout = httpx_module.Timeout(float(timeout_seconds), connect=float(connect_timeout_seconds))
+        total_timeout = max(0.1, float(timeout_seconds))
+        # httpx 要求 connect 不得超过总超时，否则直接抛 ValueError；这里先夹紧，
+        # 避免用户把 connect_timeout 配得比 timeout 大时插件报「未预期错误」。
+        connect_timeout = min(total_timeout, max(0.1, float(connect_timeout_seconds)))
+        timeout = httpx_module.Timeout(total_timeout, connect=connect_timeout)
         kwargs: dict[str, Any] = {
             "timeout": timeout,
             "headers": {
