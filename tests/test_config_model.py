@@ -10,6 +10,7 @@ from deepseek_search.config import (
     CacheSection,
     DeepSeekSearchConfig,
     LoggingSection,
+    PagesSection,
     PluginInfoSection,
     RateLimitSection,
     SearchSection,
@@ -36,6 +37,10 @@ def test_default_values_follow_documented_plan():
     assert config.cache.search_ttl_seconds == 600
     assert config.cache.fetch_ttl_seconds == 1800
     assert config.cache.max_entries == 256
+    assert config.pages.enabled is True
+    assert config.pages.ttl_seconds == 86400
+    assert config.pages.max_entries == 64
+    assert config.pages.max_total_bytes == 8388608
     assert config.logging.level == "INFO"
     assert config.logging.file_enabled is False
     assert config.commands.enabled is True
@@ -48,6 +53,7 @@ def test_sections_declare_ui_metadata():
         ApiSection,
         SearchSection,
         CacheSection,
+        PagesSection,
         RateLimitSection,
         LoggingSection,
     ):
@@ -64,12 +70,27 @@ def test_sections_declare_ui_metadata():
         (ApiSection, {"max_retries": 6}),
         (RateLimitSection, {"qps": 9.0}),
         (CacheSection, {"max_entries": 4}),
+        (PagesSection, {"max_entries": 0}),
+        (PagesSection, {"max_total_bytes": 1024}),
+        (PagesSection, {"ttl_seconds": 10}),
         (LoggingSection, {"level": "TRACE"}),
     ],
 )
 def test_sections_reject_out_of_range_values(section, payload):
     with pytest.raises(ValidationError):
         section(**payload)
+
+
+def test_pages_section_accepts_boundary_values():
+    section = PagesSection(max_entries=1, max_total_bytes=1048576, ttl_seconds=60)
+    assert section.max_entries == 1
+    assert section.max_total_bytes == 1048576
+    assert section.ttl_seconds == 60
+
+    upper = PagesSection(max_entries=2000, max_total_bytes=268435456, ttl_seconds=604800)
+    assert upper.max_entries == 2000
+    assert upper.max_total_bytes == 268435456
+    assert upper.ttl_seconds == 604800
 
 
 def test_section_assignment_validates():

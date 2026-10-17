@@ -125,6 +125,21 @@ class CacheSection(BaseModel):
     max_entries: int = Field(default=256, ge=16, le=4096, description="缓存条数上限（超出淘汰最久未使用的）")
 
 
+class PagesSection(BaseModel):
+    """网页正文磁盘缓存（支撑长网页分段续读）。"""
+
+    __ui_label__: ClassVar[str] = "页面磁盘缓存"
+    __ui_icon__: ClassVar[str] = "hard-drive"
+    __ui_order__: ClassVar[int] = 55
+
+    model_config = _SECTION_CONFIG
+
+    enabled: bool = Field(default=True, description="是否把抓取到的完整正文缓存到 data 目录，供分段续读复用")
+    ttl_seconds: int = Field(default=86400, ge=60, le=604800, description="磁盘缓存有效期（秒），过期自动清理")
+    max_entries: int = Field(default=64, ge=1, le=2000, description="磁盘缓存最多保存的页面数")
+    max_total_bytes: int = Field(default=8388608, ge=1048576, le=268435456, description="磁盘缓存总大小上限（字节，默认 8 MB）")
+
+
 class LoggingSection(BaseModel):
     """日志策略。"""
 
@@ -168,6 +183,7 @@ class DeepSeekSearchConfig(PluginConfigBase):
     fetch: FetchSection = Field(default_factory=FetchSection, description="抓取默认参数")
     ratelimit: RateLimitSection = Field(default_factory=RateLimitSection, description="本地限速")
     cache: CacheSection = Field(default_factory=CacheSection, description="结果缓存")
+    pages: PagesSection = Field(default_factory=PagesSection, description="网页正文磁盘缓存")
     logging: LoggingSection = Field(default_factory=LoggingSection, description="日志")
     commands: CommandsSection = Field(default_factory=CommandsSection, description="命令")
 
@@ -179,6 +195,7 @@ __all__ = [
     "DeepSeekSearchConfig",
     "FetchSection",
     "LoggingSection",
+    "PagesSection",
     "PluginInfoSection",
     "RateLimitSection",
     "SearchSection",
