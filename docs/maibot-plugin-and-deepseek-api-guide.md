@@ -5477,14 +5477,14 @@ plugins/blackbee114514.deepseek-search/
 | 组件 | 类型 | 名称 | 触发方式 | 返回 |
 | --- | --- | --- | --- | --- |
 | 联网搜索 | `@Tool` | `search_web` | LLM 自主调用 | `{"success", "content", "query", "result_count", "cached", "elapsed_ms", "error"}` |
-| 网页抓取 | `@Tool` | `fetch_webpage` | LLM 自主调用 | `{"success", "content", "url", "title", "chars", "truncated", ...}` |
+| 网页抓取 | `@Tool` | `fetch_webpage` | LLM 自主调用 | `{"success", "content", "url", "title", "chars", "truncated", "offset", "total_chars", "has_more", "from_disk", ...}` |
 | 搜索命令 | `@Command` | `search` | `/search 关键词`、`/搜索 关键词` | `(success, response, weight)` 三元组 |
 | 抓取命令 | `@Command` | `fetch` | `/fetch 链接`、`/抓取 链接` | 同上 |
 | 插件间 API | `@API` | `search` | 其它插件 RPC（`public=True`） | 结构化 `results` 数组 |
-| 插件间 API | `@API` | `get_stats` | 其它插件 RPC | `{ready, api, metrics, cache, ratelimit, config}` |
+| 插件间 API | `@API` | `get_stats` | 其它插件 RPC | `{ready, api, metrics, cache, pages, ratelimit, config}` |
 | 首页卡片 | `@HomeCard` | `status` | WebUI 首页 | 运行状态与配置入口 |
 
-工具参数：`search_web(query, count?, need_content?, ori_question?)`；`fetch_webpage(url, max_chars?)`。工具返回的 `content` 是给 LLM 读的中文正文，`success=false` 时同样给出可读失败原因而不是抛异常。
+工具参数：`search_web(query, count?, need_content?, ori_question?)`；`fetch_webpage(url, max_chars?, offset?)`。工具返回的 `content` 是给 LLM 读的中文正文，`success=false` 时同样给出可读失败原因而不是抛异常。抓取结果被截断时 `content` 末尾会给出续读提示（`offset=...`），模型可再次调用 `fetch_webpage` 读取后续正文；整页正文会落盘到 `data/plugins/<id>/pages/`，进程重启后仍可续读。
 
 ### A.3 默认配置速查
 
@@ -5501,6 +5501,9 @@ plugins/blackbee114514.deepseek-search/
 | `search.snippet_max_chars` / `summary_max_chars` / `content_max_chars` | `200` / `500` / `1200` | 回填 LLM 的截断长度 |
 | `search.max_results_in_text` | `8` | 单次最多展开多少条 |
 | `fetch.max_content_chars` | `4000` | 抓取正文回填上限（200–30000） |
+| `pages.enabled` | `true` | 网页正文磁盘缓存（用于 offset 续读与省费用） |
+| `pages.ttl_seconds` | `86400` | 磁盘缓存有效期（60–604800），调小可换新鲜度 |
+| `pages.max_entries` / `pages.max_total_bytes` | `64` / `8388608` | 磁盘缓存条数上限与总字节上限 |
 | `ratelimit.qps` / `ratelimit.burst` | `4.0` / `2` | 官方每账号 5 QPS，默认留余量 |
 | `cache.search_ttl_seconds` / `fetch_ttl_seconds` | `600` / `1800` | TTL 缓存 |
 | `cache.max_entries` | `256` | LRU 上限 |

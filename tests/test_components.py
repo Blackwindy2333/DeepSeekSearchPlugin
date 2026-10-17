@@ -174,3 +174,28 @@ async def test_fetch_command_caps_reply_length(plugin_with_fake_client):
     assert success is True
     assert "已截断" in response
     assert len(response) < 3000
+
+
+async def test_fetch_tool_supports_offset_continuation(plugin_with_fake_client):
+    """LLM 工具透传 offset，并在正文未读完时给出续读提示。"""
+
+    from deepseek_search.models import FetchResult
+
+    plugin, fake = plugin_with_fake_client
+    fake.fetch_result = FetchResult(url="https://example.com/long", title="长页", content="正" * 6000)
+
+    first = await plugin.fetch_webpage(url="https://example.com/long", offset=5000, max_chars=500)
+
+    assert first["success"] is True
+    assert first["offset"] == 5000
+    assert first["total_chars"] == 6000
+    assert first["has_more"] is True
+    assert "正文未读完" in first["content"]
+
+    tail = await plugin.fetch_webpage(url="https://example.com/long", offset=5500, max_chars=500)
+
+    assert tail["success"] is True
+    assert tail["offset"] == 5500
+    assert "第 5501–6000 字，共 6000 字" in tail["content"]
+    assert tail["has_more"] is False
+    assert "正文未读完" not in tail["content"]

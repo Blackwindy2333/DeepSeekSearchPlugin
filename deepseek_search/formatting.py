@@ -137,16 +137,30 @@ def format_fetch_result(
         str: 格式化文本。
     """
 
+    total = result.total_chars or len(result.content)
     body = truncate(result.content, max_content_chars)
     lines: list[str] = []
     if include_title and result.title:
         lines.append(f"标题：{result.title}")
     lines.append(f"链接：{result.url}")
-    if result.truncated or len(result.content) > max_content_chars:
-        lines.append(f"正文（已截断，原文 {len(result.content)} 字符）：")
+    if result.total_chars > len(result.content):
+        # 分段视图：只拿到完整正文的一个窗口。
+        if result.content:
+            start = result.offset + 1
+            end = result.offset + len(result.content)
+            lines.append(f"正文（第 {start}–{end} 字，共 {total} 字，已截断）：")
+        else:
+            lines.append("正文：")
+    elif result.truncated or len(result.content) > max_content_chars:
+        lines.append(f"正文（已截断，原文 {total} 字符）：")
     else:
         lines.append("正文：")
     lines.append(body or "（未提取到正文）")
+    if result.has_more:
+        lines.append(
+            f'（正文未读完，继续读取：再次调用 fetch_webpage，url="{result.url}"，'
+            f"offset={result.next_offset}）"
+        )
     return "\n".join(lines)
 
 

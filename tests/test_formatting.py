@@ -78,6 +78,24 @@ def test_fetch_result_handles_empty_content():
     assert "（未提取到正文）" in text
 
 
+def test_fetch_result_segmented_view_has_offset_header_and_hint():
+    """分段视图：标题展示当前窗口与全文长度，末尾追加 offset 续读提示。"""
+
+    result = FetchResult(
+        url="https://example.com/long",
+        title="长文",
+        content="x" * 150,
+        offset=100,
+        total_chars=300,
+    )
+    text = format_fetch_result(result, max_content_chars=150)
+
+    assert "第 101–250 字，共 300 字" in text
+    assert "已截断" in text
+    assert "继续读取" in text
+    assert "offset=250" in text
+
+
 def test_command_format_is_compact():
     text = format_search_for_command(sample_search_result(count=3), max_results=2)
     assert "搜索结果" in text

@@ -189,6 +189,20 @@ class FetchResult:
     title: str = ""
     content: str = ""
     truncated: bool = False
+    offset: int = 0
+    total_chars: int = 0
+
+    @property
+    def has_more(self) -> bool:
+        """当前分段之后是否还有正文未返回。"""
+
+        return self.offset + len(self.content) < self.total_chars
+
+    @property
+    def next_offset(self) -> int:
+        """继续读取时应传给 ``fetch_webpage`` 的 ``offset``。"""
+
+        return self.offset + len(self.content)
 
     @classmethod
     def from_payload(cls, url: str, payload: Mapping[str, Any]) -> "FetchResult":
@@ -219,6 +233,10 @@ class FetchResult:
             "title": self.title,
             "content": self.content,
             "truncated": self.truncated,
+            "offset": self.offset,
+            "total_chars": self.total_chars,
+            "has_more": self.has_more,
+            "next_offset": self.next_offset,
         }
 
 

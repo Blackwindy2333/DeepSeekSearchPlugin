@@ -13,11 +13,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 from .cache import TTLCache
@@ -25,10 +26,14 @@ from .client import DeepSeekClient
 from .config import DeepSeekSearchConfig
 from .errors import ConfigurationError, DeepSeekSearchError
 from .formatting import format_error, format_fetch_result, format_search_result
+from .logging_utils import get_child
 from .metrics import Metrics
 from .models import FetchResult, SearchResult
 from .ratelimit import TokenBucket
 from .settings import Settings
+
+if TYPE_CHECKING:
+    from .pages import PageRecord, PageStore
 
 #: 日志中 query 的最大展示长度（避免刷屏与泄露长文本）
 LOG_QUERY_LIMIT = 120
@@ -84,6 +89,7 @@ class FetchOutcome:
     url: str = ""
     result: FetchResult | None = None
     cached: bool = False
+    from_disk: bool = False
     elapsed_ms: float = 0.0
     error: str = ""
 
@@ -95,12 +101,16 @@ class FetchOutcome:
             "content": self.content,
             "url": self.url,
             "cached": self.cached,
+            "from_disk": self.from_disk,
             "elapsed_ms": round(self.elapsed_ms, 1),
         }
         if self.result is not None:
             payload["title"] = self.result.title
             payload["chars"] = len(self.result.content)
             payload["truncated"] = self.result.truncated
+            payload["offset"] = self.result.offset
+            payload["total_chars"] = self.result.total_chars
+            payload["has_more"] = self.result.has_more
         if self.error:
             payload["error"] = self.error
         return payload
@@ -117,6 +127,7 @@ class DeepSeekSearchService:
         env: Settings | None = None,
         metrics: Metrics | None = None,
         client_factory: Callable[[dict[str, Any], logging.Logger], DeepSeekClient] | None = None,
+        data_dir: str | Path | None = None,
     ) -> None:
         """创建服务实例。
 
@@ -126,6 +137,7 @@ class DeepSeekSearchService:
             env: 环境变量设置，缺省用 ``dsp.settings.settings``。
             metrics: 统计对象，缺省新建。
             client_factory: 客户端工厂（测试可注入假客户端）。
+            data_dir: 插件数据目录；提供后才会启用网页正文磁盘缓存。
         """
 
         self._config = config
@@ -136,6 +148,8 @@ class DeepSeekSearchService:
         self._client: DeepSeekClient | None = None
         self._client_signature: tuple[Any, ...] = ()
         self._closed = False
+        self._data_dir = data_dir
+        self._page_store: PageStore | None = None
 
         self._cache: TTLCache[Any] = TTLCache(config.cache.max_entries)
         self._bucket: TokenBucket | None = self._make_bucket(config)
@@ -192,6 +206,37 @@ class DeepSeekSearchService:
             preview_chars=effective["preview_chars"],
         )
 
+    def _ensure_page_store(self) -> PageStore | None:
+        """按需创建 / 更新网页正文磁盘缓存。
+
+        ``pages.py`` 采用函数内延迟导入：即使部署包缺少该模块，插件其余功能也能
+        正常加载；只有真正需要读写磁盘缓存时才会 import。
+
+        Returns:
+            PageStore | None: 磁盘缓存实例；未启用或未配置数据目录时为 None。
+        """
+
+        cfg = self._config
+        if not cfg.pages.enabled or self._data_dir in (None, ""):
+            return None
+        from .pages import PageStore
+
+        if self._page_store is None:
+            self._page_store = PageStore(
+                Path(self._data_dir) / "pages",
+                ttl_seconds=cfg.pages.ttl_seconds,
+                max_entries=cfg.pages.max_entries,
+                max_total_bytes=cfg.pages.max_total_bytes,
+                logger=get_child(self._logger, "pages"),
+            )
+        else:
+            self._page_store.update_settings(
+                ttl_seconds=cfg.pages.ttl_seconds,
+                max_entries=cfg.pages.max_entries,
+                max_total_bytes=cfg.pages.max_total_bytes,
+            )
+        return self._page_store
+
     # ── 生命周期 ────────────────────────────────────────────
 
     async def apply_config(self, config: DeepSeekSearchConfig) -> dict[str, Any]:
@@ -228,8 +273,14 @@ class DeepSeekSearchService:
                 "search_ttl_seconds": config.cache.search_ttl_seconds,
                 "fetch_ttl_seconds": config.cache.fetch_ttl_seconds,
             }
+        pages_changed = old.pages != config.pages
+        if pages_changed:
+            changes["pages"] = "updated"
 
         self._config = config
+        if pages_changed:
+            # 磁盘缓存已存在时就地更新 TTL/容量；enabled 关闭时 store 仍保留但 fetch 不再使用。
+            self._ensure_page_store()
         new_signature = self._signature(config)
         # 客户端持有创建时传入的令牌桶引用：限速开关切换会替换桶对象，
         # 此时必须重建客户端，否则旧客户端会继续按旧桶限速（或继续完全不限速）。
@@ -418,12 +469,19 @@ class DeepSeekSearchService:
             elapsed_ms=elapsed_ms,
         )
 
-    async def fetch(self, url: str, *, max_chars: int | None = None) -> FetchOutcome:
-        """抓取单个网页（含缓存与限速）。
+    async def fetch(
+        self,
+        url: str,
+        *,
+        max_chars: int | None = None,
+        offset: int = 0,
+    ) -> FetchOutcome:
+        """抓取单个网页（含缓存与限速），支持从正文任意位置分段读取。
 
         Args:
             url: 目标链接。
             max_chars: 返回正文的最大字符数，None 用配置默认值。
+            offset: 从正文第几个字符开始读取（0 表示开头），用于长文续读。
 
         Returns:
             FetchOutcome: 统一结果对象。
@@ -435,34 +493,56 @@ class DeepSeekSearchService:
         target = str(url or "").strip()
         limit = int(max_chars) if max_chars else int(cfg.fetch.max_content_chars)
         limit = max(200, min(30000, limit))
+        start = max(0, int(offset))
 
         if cfg.logging.log_requests:
-            self._logger.info("fetch.request rid=%s url=%s max_chars=%d", rid, _shorten(target), limit)
+            self._logger.info(
+                "fetch.request rid=%s url=%s max_chars=%d offset=%d",
+                rid,
+                _shorten(target),
+                limit,
+                start,
+            )
 
         cache_key = ("fetch", target)
+        full: FetchResult | None = None
+        memory_hit = False
         if cfg.cache.enabled:
             cached = self._cache.get(cache_key)
             if isinstance(cached, FetchResult):
-                elapsed_ms = (time.monotonic() - started) * 1000
-                self._metrics.record_fetch(elapsed_ms=elapsed_ms, cached=True, chars=len(cached.content))
-                # 缓存里存的是完整正文，truncated 必须按本次请求的 limit 重新计算：
-                # 否则先抓 6000 字、再用 500 字上限命中缓存时，标记会错误地停留在「未截断」。
-                cached_view = FetchResult(
-                    url=cached.url or target,
-                    title=cached.title,
-                    content=cached.content,
-                    truncated=len(cached.content) > limit,
+                full = cached
+                memory_hit = True
+
+        from_disk = False
+        if full is None:
+            # 内存缓存未命中（或已关闭）时先看磁盘：命中则完全不调用 API。
+            full = await self._load_page_from_disk(target, rid)
+            from_disk = full is not None
+
+        if full is not None:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            if memory_hit and cfg.logging.log_requests:
+                self._logger.info(
+                    "fetch.cache_hit rid=%s chars=%d elapsed_ms=%.1f",
+                    rid,
+                    len(full.content),
+                    elapsed_ms,
                 )
-                if cfg.logging.log_requests:
-                    self._logger.info("fetch.cache_hit rid=%s chars=%d elapsed_ms=%.1f", rid, len(cached.content), elapsed_ms)
-                return FetchOutcome(
-                    success=True,
-                    content=self._format_fetch(cached_view, limit),
-                    url=target,
-                    result=cached_view,
-                    cached=True,
-                    elapsed_ms=elapsed_ms,
-                )
+            # 内存/磁盘命中都没有调用 API，统一按缓存命中计数；磁盘命中另记 pages.disk_hits。
+            self._metrics.record_fetch(elapsed_ms=elapsed_ms, cached=True, chars=len(full.content))
+            if from_disk:
+                self._metrics.record_disk_hit()
+                self._logger.info("fetch.disk_hit rid=%s chars=%d", rid, len(full.content))
+            return self._build_fetch_outcome(
+                full,
+                url=target,
+                limit=limit,
+                offset=start,
+                cached=True,
+                from_disk=from_disk,
+                elapsed_ms=elapsed_ms,
+                rid=rid,
+            )
 
         try:
             client = self._ensure_client()
@@ -499,9 +579,16 @@ class DeepSeekSearchService:
 
         elapsed_ms = (time.monotonic() - started) * 1000
         truncated = len(result.content) > limit
-        stored = FetchResult(url=result.url, title=result.title, content=result.content, truncated=truncated)
+        full = FetchResult(url=result.url, title=result.title, content=result.content)
         if cfg.cache.enabled:
+            stored = FetchResult(
+                url=result.url,
+                title=result.title,
+                content=result.content,
+                truncated=truncated,
+            )
             self._cache.set(cache_key, stored, float(cfg.cache.fetch_ttl_seconds))
+        await self._save_page_to_disk(target, full, rid)
         self._metrics.record_fetch(elapsed_ms=elapsed_ms, cached=False, chars=len(result.content))
         if cfg.logging.log_requests:
             self._logger.info(
@@ -511,12 +598,120 @@ class DeepSeekSearchService:
                 truncated,
                 elapsed_ms,
             )
+        return self._build_fetch_outcome(
+            full,
+            url=target,
+            limit=limit,
+            offset=start,
+            cached=False,
+            from_disk=False,
+            elapsed_ms=elapsed_ms,
+            rid=rid,
+        )
+
+    # ── 内部：网页正文磁盘缓存 ──────────────────────────────
+
+    async def _load_page_from_disk(self, target: str, rid: str) -> FetchResult | None:
+        """从磁盘缓存读取完整正文；未启用、未命中或读取失败时返回 None。"""
+
+        store = self._ensure_page_store()
+        if store is None:
+            return None
+        try:
+            record: PageRecord | None = await asyncio.to_thread(store.get, target)
+        except Exception as exc:  # noqa: BLE001 - 磁盘缓存读失败只降级为回源，不影响抓取
+            self._metrics.record_disk_error()
+            self._logger.warning("fetch.disk_error rid=%s action=read error=%s", rid, _shorten(str(exc)))
+            return None
+        if record is None:
+            return None
+        return FetchResult(
+            url=record.url or target,
+            title=record.title,
+            content=record.content,
+            total_chars=len(record.content),
+        )
+
+    async def _save_page_to_disk(self, target: str, full: FetchResult, rid: str) -> None:
+        """把完整正文写入磁盘缓存；失败只记 warning，不影响本次抓取结果。"""
+
+        store = self._ensure_page_store()
+        if store is None:
+            return
+        try:
+            # PageRecord 与 PageStore 同源，延迟导入保证缺页时只有磁盘缓存降级。
+            from .pages import PageRecord
+
+            record = PageRecord(url=target, title=full.title, content=full.content, fetched_at=time.time())
+            await asyncio.to_thread(store.put, record)
+        except Exception as exc:  # noqa: BLE001 - 磁盘缓存写失败只降级为「不缓存」
+            self._metrics.record_disk_error()
+            self._logger.warning("fetch.disk_error rid=%s action=write error=%s", rid, _shorten(str(exc)))
+            return
+        self._metrics.record_disk_save()
+
+    def _build_fetch_outcome(
+        self,
+        full: FetchResult,
+        *,
+        url: str,
+        limit: int,
+        offset: int,
+        cached: bool,
+        from_disk: bool,
+        elapsed_ms: float,
+        rid: str,
+    ) -> FetchOutcome:
+        """按 ``offset`` / ``limit`` 截取正文窗口并构造对外结果。"""
+
+        cfg = self._config
+        total = len(full.content)
+        if offset > 0 and offset >= total:
+            return FetchOutcome(
+                success=True,
+                content=f"（已到正文末尾，共 {total} 字）",
+                url=url,
+                result=FetchResult(
+                    url=url,
+                    title=full.title,
+                    content="",
+                    truncated=False,
+                    offset=total,
+                    total_chars=total,
+                ),
+                cached=cached,
+                from_disk=from_disk,
+                elapsed_ms=elapsed_ms,
+            )
+        window = full.content[offset : offset + limit]
+        view = FetchResult(
+            url=url,
+            title=full.title,
+            content=window,
+            truncated=offset + len(window) < total,
+            offset=offset,
+            total_chars=total,
+        )
+        formatted = format_fetch_result(
+            view,
+            max_content_chars=limit,
+            include_title=bool(cfg.fetch.include_title),
+        )
+        if cfg.logging.log_requests:
+            self._logger.info(
+                "fetch.window rid=%s offset=%d total=%d returned=%d",
+                rid,
+                offset,
+                total,
+                len(window),
+            )
         return FetchOutcome(
             success=True,
-            content=self._format_fetch(stored, limit),
-            url=result.url,
-            result=stored,
-            cached=False,
+            content=formatted,
+            url=url,
+            result=view,
+            cached=cached,
+            from_disk=from_disk,
             elapsed_ms=elapsed_ms,
         )
 
@@ -535,6 +730,7 @@ class DeepSeekSearchService:
             },
             "metrics": self._metrics.snapshot(),
             "cache": self._cache.stats(),
+            "pages": self._page_snapshot(),
             "ratelimit": None if self._bucket is None else {
                 "enabled": True,
                 "qps": self._bucket.qps,
@@ -550,6 +746,23 @@ class DeepSeekSearchService:
             },
         }
 
+    def _page_snapshot(self) -> dict[str, Any]:
+        """磁盘缓存状态：命中/写入/失败统计 + 容量占用（未启用时容量为 0）。"""
+
+        cfg = self._config
+        store = self._page_store
+        stats: dict[str, Any] = store.stats() if store is not None else {}
+        return {
+            "enabled": bool(store is not None and cfg.pages.enabled),
+            "entries": int(stats.get("entries", 0)),
+            "total_bytes": int(stats.get("total_bytes", 0)),
+            "max_entries": int(stats.get("max_entries", cfg.pages.max_entries)),
+            "max_total_bytes": int(stats.get("max_total_bytes", cfg.pages.max_total_bytes)),
+            "disk_hits": self._metrics.disk_hits,
+            "disk_saves": self._metrics.disk_saves,
+            "disk_errors": self._metrics.disk_errors,
+        }
+
     # ── 内部：格式化 ────────────────────────────────────────
 
     def _format_search(self, result: SearchResult) -> str:
@@ -563,15 +776,6 @@ class DeepSeekSearchService:
             summary_max_chars=int(cfg.search.summary_max_chars),
             content_max_chars=int(cfg.search.content_max_chars),
             show_authority_hint=bool(cfg.search.show_authority_hint),
-        )
-
-    def _format_fetch(self, result: FetchResult, limit: int) -> str:
-        """按当前配置格式化抓取结果。"""
-
-        return format_fetch_result(
-            result,
-            max_content_chars=limit,
-            include_title=bool(self._config.fetch.include_title),
         )
 
 

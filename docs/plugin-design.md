@@ -62,6 +62,7 @@
 | `client.py` | httpx 客户端、Bearer 鉴权、超时、重试、解析、错误归一 | 不管缓存、限速、文本裁剪 |
 | `ratelimit.py` | 异步令牌桶（`qps`/`burst`，可热更新） | 不做全局进程间协调 |
 | `cache.py` | TTL + LRU，线程安全，统计命中率 | 不落盘 |
+| `pages.py` | 网页正文按 URL 落盘（`sha256` 文件名、原子写、条数 + 字节双限额、TTL 清理） | 不做网络请求、不格式化文本 |
 | `metrics.py` | 请求数、失败数、缓存、重试、耗时、最后错误 | 不导出 Prometheus |
 | `formatting.py` | 搜索结果/抓取结果/错误/状态行的中文排版 | 不发消息 |
 | `services.py` | 串联缓存→限速→客户端→格式化，返回 `*Outcome` | 不依赖 `ctx`、不读 `config.toml` |
@@ -89,7 +90,7 @@ service.search()
 SearchOutcome.to_dict() → {"success", "content", ...} → Host 取 content 喂给 LLM
 ```
 
-抓取同理，键为 `url`，正文按 `fetch.max_content_chars` 截断并标记 `truncated`。
+抓取同理，键为 `url`，正文按 `fetch.max_content_chars` 截断并标记 `truncated`；完整正文同时落盘（`pages.*`），返回窗口末尾会附带 `offset`，再次调用即可续读。
 
 ## 4. 关键设计取舍
 
@@ -124,6 +125,7 @@ SDK 的 `collect_components(instance)` 遍历插件实例的属性找装饰器�
 - 官方限速是**每账号** Search 5 QPS、Fetch 5 QPS，且与 API Key 无关。插件默认 `qps=4.0`、`burst=2`，给同账号的其它客户端留余量；高并发部署可调到 5 以下任意值，不建议超过 5。
 - 缓存是进程内的 TTL + LRU：搜索默认 10 分钟、抓取默认 30 分钟。相同查询在 TTL 内直接复用，命令与 Tool 共享同一份缓存；配置热更新时只 `resize` 不重建，避免瞬间击穿。
 - 缓存键包含所有影响结果的参数，`need_content` 不同不会错误复用。
+- 另有一层**磁盘缓存**（`pages.py`）：抓取成功的完整正文按 URL 落盘到 `data/plugins/<id>/pages/`，文件名取 `sha256(url)` 前 32 位；内存未命中时先查磁盘，命中就完全跳过 Fetch API，因此长网页可以在进程重启后继续按 `offset` 读取。条数与总字节双限额淘汰，TTL 默认 24 小时，所有磁盘异常只降级为「不缓存」，不影响抓取主流程。
 
 ### 4.6 配置热更新
 
@@ -169,7 +171,7 @@ SDK 的 `collect_components(instance)` 遍历插件实例的属性找装饰器�
 | --- | --- | --- |
 | 缓存为进程内 | 多 Runner 实例不共享 | 抽 `CacheBackend` 接口接 Redis |
 | 令牌桶不跨进程 | 多实例总和可能超过 5 QPS | 接入宿主级限速或 Redis 令牌桶 |
-| Fetch 正文不落盘 | 大页面只能截断返回 | 增加「正文保存到 data 目录 + 返回文件引用」 |
+| ~~Fetch 正文不落盘~~ **已支持** | 大页面正文落盘到 `data/pages`，`fetch_webpage` 支持 `offset` 分段续读，返回末尾附 `next_offset` 提示 | 后续：首页卡片展示缓存占用、按站点配置 TTL |
 | 无结果排序策略 | 完全信任官方 `rerank_score` | 增加去重与站点多样性重排 |
 | 首页卡片为静态内容 | 不展示实时计数 | 宿主支持动态内容后接 `get_stats` |
 | 热重载会关闭进行中的连接 | 极端并发下正在执行的请求报一次网络错误 | 引用计数或延迟关闭旧客户端 |
@@ -183,7 +185,11 @@ SDK 的 `collect_components(instance)` 遍历插件实例的属性找装饰器�
 | `search.retry` | WARNING | `rid` `attempt` `status` `backoff_ms` |
 | `search.success` | INFO | `rid` `results` `cache` `elapsed_ms` |
 | `search.failed` | ERROR | `rid` `error` `status` |
-| `fetch.request` | INFO | `rid` `url` |
+| `fetch.request` | INFO | `rid` `url` `max_chars` `offset` |
+| `fetch.disk_hit` | INFO | `rid` `chars` |
+| `fetch.window` | INFO | `rid` `offset` `total` `returned` |
 | `fetch.success` | INFO | `rid` `chars` `elapsed_ms` |
 | `fetch.failed` | ERROR | `rid` `url` `error` |
 | `config.reload` | INFO | `scope` `version` `changes` |
+
+磁盘缓存模块（`pages.py`）另有 `pages.hit` / `pages.save` / `pages.expired` / `pages.evict` / `pages.corrupt` / `pages.save_failed` 事件，字段含 `url` `path` `chars` `age` 等，便于按关键字检索缓存生命周期。

@@ -9,7 +9,7 @@ from deepseek_search.settings import Settings
 from conftest import FakeClient, make_config, sample_search_result
 
 
-def make_service(config=None, fake=None, env=None):
+def make_service(config=None, fake=None, env=None, *, data_dir=None):
     """构造注入了假客户端的 service。"""
 
     config = config or make_config(ratelimit={"enabled": False})
@@ -20,7 +20,12 @@ def make_service(config=None, fake=None, env=None):
         factory_calls.append(effective)
         return fake
 
-    service = DeepSeekSearchService(config, env=env or Settings(), client_factory=factory)
+    service = DeepSeekSearchService(
+        config,
+        env=env or Settings(),
+        client_factory=factory,
+        data_dir=data_dir,
+    )
     return service, fake, factory_calls
 
 
@@ -170,7 +175,7 @@ async def test_apply_config_rebuilds_client_when_api_settings_change():
 async def test_snapshot_exposes_all_sections():
     service, _, _ = make_service()
     snapshot = service.snapshot()
-    assert set(snapshot) == {"ready", "api", "metrics", "cache", "ratelimit", "config"}
+    assert set(snapshot) == {"ready", "api", "metrics", "cache", "pages", "ratelimit", "config"}
     assert snapshot["api"]["base_url"] == "https://api.deepseek.com"
     assert snapshot["config"]["search_default_count"] == 8
     assert snapshot["ratelimit"] is None  # 该配置关闭了限速
@@ -235,3 +240,109 @@ async def test_closed_service_rejects_new_requests():
     assert outcome.success is False
     assert outcome.error
     assert fake.closed is True
+
+
+# ── 网页正文磁盘缓存与分段续读 ─────────────────────────────
+
+
+async def test_fetch_saves_page_content_to_disk_cache(tmp_path):
+    """抓取成功后完整正文落盘；快照能统计条目与字节数。"""
+
+    from deepseek_search.models import FetchResult
+
+    full_content = "正" * 6000
+    fake = FakeClient(
+        fetch_result=FetchResult(url="https://example.com/disk", title="磁盘页", content=full_content),
+    )
+    service, _, _ = make_service(fake=fake, data_dir=tmp_path)
+
+    outcome = await service.fetch("https://example.com/disk")
+
+    assert outcome.success is True
+    assert outcome.from_disk is False
+    files = list((tmp_path / "pages").glob("*.json"))
+    assert len(files) == 1
+    pages = service.snapshot()["pages"]
+    assert pages["enabled"] is True
+    assert pages["entries"] == 1
+    assert pages["total_bytes"] == files[0].stat().st_size
+    assert pages["disk_saves"] == 1
+    assert service.snapshot()["metrics"]["pages"]["disk_saves"] == 1
+
+
+async def test_fetch_serves_continuation_from_disk_without_api(tmp_path):
+    """关闭内存缓存后，同一 URL 的 offset 续读只读磁盘，不再调用 API。"""
+
+    from deepseek_search.models import FetchResult
+
+    full_content = "甲" * 6000
+    fake = FakeClient(
+        fetch_result=FetchResult(url="https://example.com/disk", title="长文", content=full_content),
+    )
+    config = make_config(ratelimit={"enabled": False}, cache={"enabled": False})
+    service, fake, _ = make_service(config=config, fake=fake, data_dir=tmp_path)
+
+    first = await service.fetch("https://example.com/disk")
+    assert first.success is True
+    assert first.from_disk is False
+
+    second = await service.fetch("https://example.com/disk", offset=500)
+
+    assert len(fake.fetch_calls) == 1
+    assert second.success is True
+    assert second.from_disk is True
+    assert second.result is not None
+    assert second.result.offset == 500
+    assert second.result.total_chars == 6000
+    assert "第 501–4500 字，共 6000 字" in second.content
+    assert "正文未读完" in second.content
+    assert "offset=4500" in second.content
+    assert service.snapshot()["pages"]["disk_hits"] == 1
+
+
+async def test_fetch_offset_past_end_reports_end(tmp_path):
+    """offset 超过正文长度时返回明确的「已到正文末尾」提示。"""
+
+    from deepseek_search.models import FetchResult
+
+    fake = FakeClient(
+        fetch_result=FetchResult(url="https://example.com/end", title="长文", content="乙" * 6000),
+    )
+    config = make_config(ratelimit={"enabled": False}, cache={"enabled": False})
+    service, _, _ = make_service(config=config, fake=fake, data_dir=tmp_path)
+    await service.fetch("https://example.com/end")
+
+    outcome = await service.fetch("https://example.com/end", offset=9999)
+
+    assert outcome.success is True
+    assert "已到正文末尾" in outcome.content
+    assert "共 6000 字" in outcome.content
+    assert outcome.result is not None
+    assert outcome.result.content == ""
+    assert outcome.result.offset == 6000
+    assert outcome.result.total_chars == 6000
+    assert outcome.result.has_more is False
+
+
+async def test_fetch_window_fields_follow_offset_and_limit(tmp_path):
+    """窗口视图的 content / offset / total_chars / has_more 必须自洽。"""
+
+    from deepseek_search.models import FetchResult
+
+    full_content = "丙" * 6000
+    fake = FakeClient(
+        fetch_result=FetchResult(url="https://example.com/window", title="长文", content=full_content),
+    )
+    service, _, _ = make_service(fake=fake, data_dir=tmp_path)
+
+    outcome = await service.fetch("https://example.com/window", max_chars=500)
+
+    assert outcome.result is not None
+    assert outcome.result.content == full_content[:500]
+    assert len(outcome.result.content) == 500
+    assert outcome.result.offset == 0
+    assert outcome.result.total_chars == 6000
+    assert outcome.result.has_more is True
+    assert outcome.result.next_offset == 500
+    assert outcome.to_dict()["has_more"] is True
+    assert outcome.to_dict()["total_chars"] == 6000

@@ -123,6 +123,7 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
             config,
             logger=get_child(self._logger, "services"),
             env=env_settings,
+            data_dir=self._data_dir(),
         )
         self._logger.info(
             "插件加载完成 id=%s name=%s version=%s",
@@ -173,6 +174,7 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
                 config,
                 logger=get_child(self._logger, "services"),
                 env=env_settings,
+                data_dir=self._data_dir(),
             )
             changes: dict[str, Any] = {"service": "created"}
         else:
@@ -242,7 +244,8 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
         brief_description="抓取指定网页的正文内容",
         detailed_description=(
             "当已知具体网址、需要阅读全文细节时调用（例如搜索结果里最相关的链接）。"
-            "只支持 http/https 公网链接；返回标题与 Markdown 正文，正文过长会截断。"
+            "只支持 http/https 公网链接；返回标题与 Markdown 正文。"
+            "正文过长会截断；返回内容末尾会提示可用 offset 继续读取。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -257,6 +260,12 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
                 description="返回正文的最大字符数，留空使用插件默认值",
                 required=False,
             ),
+            ToolParameterInfo(
+                name="offset",
+                param_type=ToolParamType.INTEGER,
+                description="从正文第几个字符开始读取，用于长文续读，默认 0",
+                required=False,
+            ),
         ],
         core_tool=True,
     )
@@ -264,12 +273,17 @@ class DeepSeekSearchPlugin(MaiBotPlugin):
         self,
         url: str = "",
         max_chars: int | None = None,
+        offset: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """LLM 工具：抓取网页正文。"""
+        """LLM 工具：抓取网页正文（支持 offset 分段续读）。"""
 
         service = self._require_service("fetch_webpage")
-        outcome = await service.fetch(url, max_chars=_coerce_int(max_chars))
+        outcome = await service.fetch(
+            url,
+            max_chars=_coerce_int(max_chars),
+            offset=_coerce_int(offset) or 0,
+        )
         return outcome.to_dict()
 
     # ── Command 组件 ────────────────────────────────────────

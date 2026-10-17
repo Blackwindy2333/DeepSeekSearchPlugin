@@ -25,6 +25,9 @@ class Metrics:
     fetch_failed: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
+    disk_hits: int = 0
+    disk_saves: int = 0
+    disk_errors: int = 0
     retries: int = 0
     ratelimit_waits: int = 0
     ratelimit_wait_seconds: float = 0.0
@@ -92,6 +95,21 @@ class Metrics:
 
         self.retries += 1
 
+    def record_disk_hit(self) -> None:
+        """记录一次命中网页正文磁盘缓存。"""
+
+        self.disk_hits += 1
+
+    def record_disk_save(self) -> None:
+        """记录一次网页正文写入磁盘缓存。"""
+
+        self.disk_saves += 1
+
+    def record_disk_error(self) -> None:
+        """记录一次磁盘缓存读写失败（已在调用处降级，不影响主流程）。"""
+
+        self.disk_errors += 1
+
     def record_ratelimit_wait(self, seconds: float) -> None:
         """记录一次因本地限速产生的等待。"""
 
@@ -133,6 +151,11 @@ class Metrics:
                 "hits": self.cache_hits,
                 "misses": self.cache_misses,
                 "hit_rate": self.cache_hit_rate,
+            },
+            "pages": {
+                "disk_hits": self.disk_hits,
+                "disk_saves": self.disk_saves,
+                "disk_errors": self.disk_errors,
             },
             "retries": self.retries,
             "ratelimit": {

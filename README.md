@@ -13,13 +13,13 @@
 | 能力 | 形态 | 说明 |
 | --- | --- | --- |
 | `search_web` | Tool | LLM 自主联网搜索，支持 `site:` `after:` `before:` `lang:` 等语法（`core_tool`，模型每轮直接可见） |
-| `fetch_webpage` | Tool | LLM 抓取给定链接的 Markdown 正文（`core_tool`，模型每轮直接可见） |
+| `fetch_webpage` | Tool | LLM 抓取给定链接的 Markdown 正文，支持 `offset` 分段续读长文（`core_tool`，模型每轮直接可见） |
 | `/search`、`/搜索` | Command | 用户直接搜索，最多展示 N 条 |
 | `/fetch`、`/抓取` | Command | 用户直接抓取链接正文 |
 | `search`、`get_stats` | API | 供其它插件 RPC 调用（结构化结果 / 运行统计） |
 | 首页卡片 | HomeCard | 插件状态与配置入口 |
 
-配套能力：令牌桶限速（默认 4 QPS，低于官方 5 QPS 上限）、TTL + LRU 结果缓存、失败重试（408/429/5xx/网络异常）、密钥脱敏日志、可选滚动文件日志。
+配套能力：令牌桶限速（默认 4 QPS，低于官方 5 QPS 上限）、TTL + LRU 结果缓存、网页正文磁盘缓存（配合 `offset` 分段续读）、失败重试（408/429/5xx/网络异常）、密钥脱敏日志、可选滚动文件日志。
 
 ## 安装
 
@@ -33,7 +33,7 @@
 
 ## 配置
 
-配置由 SDK 的 `config_model` 生成，WebUI 里按 `[plugin]` `[api]` `[search]` `[fetch]` `[ratelimit]` `[cache]` `[logging]` `[commands]` 分组展示。常用项：
+配置由 SDK 的 `config_model` 生成，WebUI 里按 `[plugin]` `[api]` `[search]` `[fetch]` `[ratelimit]` `[cache]` `[pages]` `[logging]` `[commands]` 分组展示。常用项：
 
 | 配置键 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -43,6 +43,10 @@
 | `search.default_count` | `8` | 默认返回条数（1–50） |
 | `search.need_content` | `false` | 是否默认附带正文 |
 | `fetch.max_content_chars` | `4000` | 抓取正文回填上限 |
+| `pages.enabled` | `true` | 是否把抓取到的正文落盘（用于 `offset` 续读） |
+| `pages.ttl_seconds` | `86400` | 磁盘缓存有效期（秒） |
+| `pages.max_entries` | `64` | 磁盘缓存最多保留的页面数 |
+| `pages.max_total_bytes` | `8388608` | 磁盘缓存总字节上限（8 MiB），超限淘汰最旧页面 |
 | `ratelimit.qps` | `4.0` | 令牌桶速率，官方上限 5 |
 | `cache.search_ttl_seconds` | `600` | 搜索结果缓存 TTL |
 | `logging.file_enabled` | `false` | 是否写 `data/plugins/<id>/logs/dsp.log` |
@@ -51,7 +55,7 @@
 
 ## 使用
 
-- **让麦麦自己搜**：正常对话即可，模型会在需要实时信息时调用 `search_web`；需要细节时再对最相关的链接调用 `fetch_webpage`。
+- **让麦麦自己搜**：正常对话即可，模型会在需要实时信息时调用 `search_web`；需要细节时再对最相关的链接调用 `fetch_webpage`。正文过长被截断时，工具返回末尾会附带 `offset`，再次调用可继续读取后续段落（正文同时缓存在插件 data 目录，进程重启后仍可续读）。
 - **手动搜索**：`/search 关键词`；**手动抓取**：`/fetch https://example.com/article`。
 - **检索语法**（直接写进关键词）：
 
@@ -84,7 +88,7 @@ plugin.py                    # 组件声明 + 生命周期（唯一入口）
 deepseek_search/             # 纯 Python 实现，可独立测试
   config.py models.py errors.py settings.py
   http.py client.py ratelimit.py cache.py metrics.py
-  formatting.py services.py logging_utils.py
+  formatting.py services.py logging_utils.py pages.py
 tests/                       # pytest，全部离线
 scripts/smoke_search.py      # 真实 API 冒烟脚本
 docs/                        # 开发指南与设计文档
